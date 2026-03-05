@@ -1,0 +1,52 @@
+#include <iostream>
+#include <vector>
+#include "csv_loader.hpp"
+#include "mc_gpu_optimized.cuh"
+#include "benchmark_runner.hpp"
+
+using namespace mini_aladdin;
+using namespace mini_aladdin::pricing;
+using namespace mini_aladdin::bench;
+
+int main() {
+    auto batch = CsvLoader::load("data/input_options.csv");
+    
+    if (batch.size() == 0) {
+        std::cerr << "No data loaded. Please check data/input_options.csv\n";
+        return 1;
+    }
+    
+    std::cout << "Loaded " << batch.size() << " options\n";
+    std::cout << "Running Monte Carlo GPU...\n";
+    
+    const int n_sims = 100000;
+    
+    // Warmup
+    auto warmup = price_batch_mc_gpu_managed(
+        batch.S, batch.K, batch.r, batch.sigma, batch.T, batch.is_call, n_sims
+    );
+    
+    std::vector<double> prices;
+    
+    auto result = run_benchmark(
+        "monte_carlo_gpu_optimized",
+        batch.size(),
+        [&]() {
+            prices = price_batch_mc_gpu_managed(
+                batch.S, batch.K, batch.r, batch.sigma, batch.T, batch.is_call, n_sims
+            );
+        },
+        1,
+        5
+    );
+    
+    result.print();
+    result.to_json("results/benchmark_mc_gpu_optimized.json");
+    
+    std::cout << "\nSample prices:\n";
+    for (size_t i = 0; i < std::min(size_t(5), prices.size()); ++i) {
+        std::cout << batch.tickers[i] << ": " << prices[i] << "\n";
+    }
+    
+    return 0;
+}
