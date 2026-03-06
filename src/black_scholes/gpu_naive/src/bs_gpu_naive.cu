@@ -8,6 +8,19 @@
 #define M_SQRT1_2 0.70710678118654752440
 #endif
 
+// Help Visual Studio IntelliSense understand CUDA keywords
+#ifndef __CUDACC__
+#define __global__
+#define __device__
+#define __host__
+#define __constant__
+#define __shared__
+#define threadIdx dim3(0,0,0)
+#define blockIdx dim3(0,0,0)
+#define blockDim dim3(1,1,1)
+#define gridDim dim3(1,1,1)
+#endif
+
 namespace mini_aladdin::pricing {
 
 // NAIVE: Array of Structs layout — deliberately breaks GPU memory coalescing.

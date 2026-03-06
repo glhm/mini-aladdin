@@ -4,6 +4,19 @@
 #include <cmath>
 #include <vector>
 
+// Help Visual Studio IntelliSense understand CUDA keywords
+#ifndef __CUDACC__
+#define __global__
+#define __device__
+#define __host__
+#define __constant__
+#define __shared__
+#define threadIdx dim3(0,0,0)
+#define blockIdx dim3(0,0,0)
+#define blockDim dim3(1,1,1)
+#define gridDim dim3(1,1,1)
+#endif
+
 namespace mini_aladdin::pricing {
 
 __global__ void init_curand_states(

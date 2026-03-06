@@ -1,679 +1,386 @@
-# Mini-Aladdin — GPU-Accelerated Financial Risk Engine
-## Complete Project Specification
+# Mini-Aladdin — Technical Specification
 
-> **Goal**: Demonstrate mastery of HPC C++20, CUDA optimization, and quantitative finance  
-> **Audience**: Quantitative finance & HPC recruiters  
-> **Input**: `data/input_options.csv` — columns: `ticker, S, K, r, sigma, T, is_call`
+## Golden Rules (read first)
 
----
-
-## Current State
-
-**Last Updated**: March 2026
-
-### Implemented Executables (6 total)
-
-| Executable | Status | Description |
-|------------|--------|-------------|
-| `black_scholes_cpu` | ✅ Implemented | CPU Black-Scholes analytical pricer (baseline) |
-| `black_scholes_gpu_naive` | ✅ Implemented | GPU naive version with AoS, sync transfers, BLOCK_SIZE=32 |
-| `black_scholes_gpu_optimized` | ✅ Implemented | GPU optimized with SoA, coalesced memory, BLOCK_SIZE=256 |
-| `monte_carlo_cpu` | ✅ Implemented | CPU Monte Carlo simulation with multi-threading |
-| `monte_carlo_gpu_naive` | ✅ Implemented | GPU naive with cuRAND host API, global accumulation |
-| `monte_carlo_gpu_optimized` | ✅ Implemented | GPU optimized with cuRAND device API, register caching |
-
-### Last Known Benchmark Results
-
-```
-================================================================================
-                    Mini-Aladdin Benchmark Results
-================================================================================
-Executable                   N Options   Mean(ms)  Throughput   Speedup
---------------------------------------------------------------------------------
-black_scholes_cpu            1,000,000    450ms     2.2M/s       1.0x
-black_scholes_gpu_naive      1,000,000     45ms      22M/s      10.0x
-black_scholes_gpu_optimized  1,000,000      9ms     110M/s      50.0x
---------------------------------------------------------------------------------
-monte_carlo_cpu              1,000,000   8200ms     122K/s       1.0x
-monte_carlo_gpu_naive        1,000,000    850ms     1.2M/s       9.6x
-monte_carlo_gpu_optimized    1,000,000    210ms     4.8M/s      39.0x
-================================================================================
-```
+- **PROJECT_SPEC.md** = source of truth for all technical decisions
+- **README.md** = recruiter-facing only, no code, no implementation details  
+- **Any agent completing a task MUST update PROJECT_SPEC.md** before closing
+- **README.md is only updated** if benchmark results or structure changed
 
 ---
 
-## Table of Contents
+## Agent Workflow Rules
 
-1. [Project Structure](#1-project-structure)
-2. [Core Library](#2-core-library)
-3. [Black-Scholes Implementations](#3-black-scholes-implementations)
-4. [Monte Carlo Implementations](#4-monte-carlo-implementations)
-5. [Build System](#5-build-system)
-6. [Benchmarking & Profiling Scripts](#6-benchmarking--profiling-scripts)
-7. [Optimization Comparison](#7-optimization-comparison)
-8. [CV Talking Points](#8-cv-talking-points)
+These rules apply to ANY agent working on this codebase, at any time.
 
----
+### Before starting any task
+1. Read PROJECT_SPEC.md entirely before writing any code
+2. If the task contradicts PROJECT_SPEC.md, stop and ask for clarification
+3. Never "fix" naive versions — de-optimizations are intentional (see section 6)
 
-## 1. Project Structure
+### After completing any task
+1. **Update PROJECT_SPEC.md** to reflect any architectural decision made
+   - New file created → add it to section 2 (executables) or section 3 (core)
+   - New optimization added → document it in section 5
+   - New constraint decided → add it to the relevant section
+   - **Do NOT paste source code** — reference by file path only
 
-```
-mini_aladdin/
-├── src/
-│   ├── core/                          # Shared C++20 library (header-only)
-│   │   ├── include/
-│   │   │   ├── option.hpp             # OptionContract & OptionBatch (SoA)
-│   │   │   ├── csv_loader.hpp         # CSV parser
-│   │   │   ├── math_utils.hpp         # normalCDF, normalPDF
-│   │   │   ├── timer.hpp              # High-resolution timer
-│   │   │   └── benchmark_runner.hpp   # Templated benchmark harness
-│   │   └── src/
-│   │
-│   ├── black_scholes/
-│   │   ├── cpu/                       # CPU implementation
-│   │   │   ├── include/
-│   │   │   │   └── bs_cpu_pricer.hpp
-│   │   │   └── src/
-│   │   │       ├── bs_cpu_pricer.cpp
-│   │   │       └── main.cpp
-│   │   │
-│   │   ├── gpu_naive/                 # GPU naive baseline
-│   │   │   ├── CMakeLists.txt
-│   │   │   ├── include/
-│   │   │   │   └── bs_gpu_naive.cuh
-│   │   │   └── src/
-│   │   │       ├── bs_gpu_naive.cu
-│   │   │       └── main.cpp
-│   │   │
-│   │   └── gpu_optimized/             # GPU optimized version
-│   │       ├── CMakeLists.txt
-│   │       ├── include/
-│   │       │   └── bs_gpu_optimized.cuh
-│   │       └── src/
-│   │           ├── bs_gpu_optimized.cu
-│   │           └── main.cpp
-│   │
-│   └── monte_carlo/
-│       ├── cpu/                       # CPU implementation
-│       │   ├── include/
-│       │   │   └── mc_cpu_pricer.hpp
-│       │   └── src/
-│       │       ├── mc_cpu_pricer.cpp
-│       │       └── main.cpp
-│       │
-│       ├── gpu_naive/                 # GPU naive baseline
-│       │   ├── CMakeLists.txt
-│       │   ├── include/
-│       │   │   └── mc_gpu_naive.cuh
-│       │   └── src/
-│       │       ├── mc_gpu_naive.cu
-│       │       └── main.cpp
-│       │
-│       └── gpu_optimized/             # GPU optimized version
-│           ├── CMakeLists.txt
-│           ├── include/
-│           │   └── mc_gpu_optimized.cuh
-│           └── src/
-│               ├── mc_gpu_optimized.cu
-│               └── main.cpp
-│
-├── scripts/
-│   ├── benchmark_all.sh               # Run all 6 benchmarks
-│   ├── profile_nsight.sh              # Nsight profiling
-│   └── aggregate_results.py           # Results aggregation
-│
-├── data/
-│   └── input_options.csv              # 1M+ European options dataset
-│
-├── results/                           # Benchmark outputs
-│   ├── benchmark_*.json
-│   └── nsight/
-│
-├── CMakeLists.txt                     # Root CMake configuration
-└── PROJECT_SPEC.md                    # This file
-```
+2. **Update README.md** if and only if:
+   - Benchmark results changed → update the comparison table
+   - A new executable was added → update the 6 executables table
+   - Build instructions changed → update Quick Start
+   - Never add implementation details to README.md
+
+3. **Run the validation checklist** before closing the task:
+   - [ ] PROJECT_SPEC.md reflects current state of the codebase
+   - [ ] README.md contains no source code snippets
+   - [ ] PROJECT_SPEC.md contains no copy-pasted source code
+   - [ ] All new files referenced by path in PROJECT_SPEC.md
+   - [ ] Naive versions still contain their intentional de-optimizations
 
 ---
 
-## 2. Core Library
+## 1. Project Purpose & Audience
 
-### 2.1 `option.hpp`
+This project demonstrates high-performance computing (HPC) expertise through a GPU-accelerated financial options pricing engine. It targets quantitative finance and HPC engineering roles, with a focus on measurable optimization impact through naive-to-optimized comparisons.
 
-```cpp
-#pragma once
-#include <string>
-#include <vector>
-#include <cstdint>
+The key differentiator is the intentional inclusion of unoptimized baselines that allow Nsight profiling to quantify the exact impact of each CUDA optimization technique.
 
-namespace mini_aladdin {
+---
 
-/// Structure of Arrays (SoA) layout for cache-friendly batch processing
-struct OptionBatch {
-    std::vector<double> S;
-    std::vector<double> K;
-    std::vector<double> r;
-    std::vector<double> sigma;
-    std::vector<double> T;
-    std::vector<int8_t> is_call;
-    std::vector<std::string> tickers;
-    
-    [[nodiscard]] std::size_t size() const noexcept { return S.size(); }
-    
-    void reserve(std::size_t n) {
-        S.reserve(n); K.reserve(n); r.reserve(n);
-        sigma.reserve(n); T.reserve(n); is_call.reserve(n);
-        tickers.reserve(n);
-    }
-};
+## 2. The 6 Executables — Roles & Responsibilities
 
-} // namespace mini_aladdin
-```
+| Executable | Source File | Role | Key Design Constraints |
+|------------|-------------|------|------------------------|
+| `black_scholes_cpu` | `src/black_scholes/cpu/src/bs_cpu_pricer.cpp` | Baseline | Sequential CPU, std::span for zero-copy, AVX2 auto-vectorization via flags |
+| `black_scholes_gpu_naive` | `src/black_scholes/gpu_naive/src/bs_gpu_naive.cu` | Naive baseline | AoS layout, BLOCK_SIZE=32, sync transfers, pageable memory, inline math |
+| `black_scholes_gpu_optimized` | `src/black_scholes/gpu_optimized/src/bs_gpu_optimized.cu` | Optimized | SoA layout, BLOCK_SIZE=256, __host__ __device__ math reuse |
+| `monte_carlo_cpu` | `src/monte_carlo/cpu/src/mc_cpu_pricer.cpp` | Baseline | std::execution::par_unseq, std::mt19937_64 per thread |
+| `monte_carlo_gpu_naive` | `src/monte_carlo/gpu_naive/src/mc_gpu_naive.cu` | Naive baseline | AoS, BLOCK_SIZE=32, cuRAND host API, double precision, global accumulation |
+| `monte_carlo_gpu_optimized` | `src/monte_carlo/gpu_optimized/src/mc_gpu_optimized.cu` | Optimized | SoA, BLOCK_SIZE=256, cuRAND device API, register accumulation |
 
-### 2.2 `math_utils.hpp`
+---
 
-```cpp
-#pragma once
-#include <cmath>
+## 3. Core Library — Design Decisions
 
-namespace mini_aladdin::math {
+### option.hpp
+**What**: Defines `OptionContract` (AoS) and `OptionBatch` (SoA) data structures.
+**Why**: CPU code benefits from cache-friendly AoS; GPU optimized code requires coalesced SoA.
+**Decisions**:
+- `OptionContract` includes padding to 64 bytes (cache line) for CPU cache efficiency
+- `OptionBatch` uses separate vectors for each field to enable GPU memory coalescing
+- `is_call` stored as `int8_t` (not bool) for explicit 1-byte width and GPU compatibility
 
-#ifdef __CUDACC__
-__host__ __device__
-#endif
-inline double normalCDF(double x) noexcept {
-    return 0.5 * std::erfc(-x * M_SQRT1_2);
+### math_utils.hpp
+**What**: `normalCDF` and `normalPDF`, compiled for both CPU and GPU.
+**Why**: Avoids duplicating math between CPU pricer and GPU kernel.
+**Decisions**:
+- Uses `erfc()` instead of polynomial approximation: numerically stable in distribution tails
+- `__host__ __device__` without `#else` branch: `erfc()` works in global namespace on both CPU and GPU
+- `constexpr` constants `SQRT1_2`, `INV_SQRT2PI`: evaluated at compile time, no runtime cost
+
+### timer.hpp
+**What**: High-resolution timer with milliseconds and nanoseconds precision.
+**Why**: Benchmarking requires microsecond-level precision for short GPU kernels.
+**Decisions**:
+- `std::chrono::steady_clock` (monotonic, not system clock)
+- `ScopedTimer` RAII class for automatic timing of code blocks
+- `throughput()` helper computes options/second from elapsed time
+
+### benchmark_runner.hpp
+**What**: Statistical benchmarking harness with warmup and multiple runs.
+**Why**: Cold cache and branch predictor warming are essential for reproducible results.
+**Decisions**:
+- `n_warmup = 3` runs before timing (stabilizes cache and branch predictor)
+- `n_runs = 10` for statistical significance (stddev calculation)
+- JSON output for automated aggregation by `aggregate_results.py`
+- Designated initializers in C++20 for `BenchmarkResult` construction
+
+### csv_loader.hpp
+**What**: Parses `data/input_options.csv` into `OptionBatch`.
+**Why**: Simple CSV format for easy dataset generation and inspection.
+**Decisions**:
+- Header skip on first line
+- `std::stringstream` for parsing (simpler than regex for fixed format)
+- Returns empty batch on file error (caller checks `batch.size()`)
+
+---
+
+## 4. Data Layout Rules
+
+### When to use AoS (OptionContract)
+- **CPU implementations** — cache locality: loading one option brings all fields into cache
+- **Naive GPU** — intentional anti-pattern to demonstrate coalescing impact
+
+### When to use SoA (OptionBatch)
+- **Optimized GPU** — memory coalescing: 32 threads read 32 contiguous doubles = 1 transaction
+
+### Hardware reason
+GPU memory bus is 256 bytes wide on T4. With SoA:
+- 32 threads × 8 bytes = 256 bytes = exactly 1 memory transaction
+- With AoS: 32 threads read 48 bytes apart = 32 separate transactions
+
+### Rule
+- Optimized GPU code MUST use SoA (via `OptionBatch`)
+- Naive GPU code MUST use AoS (intentional for baseline comparison)
+- CPU code can use either; `OptionContract` is preferred for readability
+
+---
+
+## 5. CUDA Optimization Decisions
+
+### Optimization: SoA Memory Layout
+**Applied in**: `black_scholes_gpu_optimized`, `monte_carlo_gpu_optimized`
+**NOT applied in**: `black_scholes_gpu_naive`, `monte_carlo_gpu_naive` (intentional baseline)
+**Hardware reason**: 32 threads in a warp read contiguous addresses → 1 memory transaction instead of 32. T4 memory bus is 256 bytes wide = exactly 32 doubles.
+**Expected impact**: Global Load Efficiency 3% → 98% (verify in Nsight Compute → Memory Workload Analysis → Global Load Efficiency)
+
+### Optimization: BLOCK_SIZE=256
+**Applied in**: gpu_optimized versions
+**NOT applied in**: gpu_naive versions (BLOCK_SIZE=32, intentional)
+**Hardware reason**: 256 threads = 8 warps per block. SM can hold 32 warps active. With 8 warps per block, SM juggles multiple blocks → hides memory latency. With 32 threads (1 warp), SM stalls waiting for memory.
+**Expected impact**: SM Occupancy 20% → 75%
+
+### Optimization: cuRAND Device API
+**Applied in**: `monte_carlo_gpu_optimized` only
+**NOT applied in**: `monte_carlo_gpu_naive` (uses cuRAND host API, intentional)
+**Hardware reason**: Device API generates random numbers on-chip per thread. Host API generates on CPU then transfers entire buffer via PCIe.
+**Expected impact**: Eliminates ~800MB PCIe transfer per run (10k options × 10k sims × 8B)
+
+### Optimization: Register Accumulation
+**Applied in**: `monte_carlo_gpu_optimized` only
+**NOT applied in**: `monte_carlo_gpu_naive` (kernel still uses local register for sum, but the key difference is RNG generation location)
+**Hardware reason**: Local variables live in registers (0 latency). Global memory access costs ~600 cycles. With 10k sims per thread, naive version with global RNG buffer = 10k × PCIe latency stalls.
+**Expected impact**: Removes PCIe bottleneck entirely
+
+### Optimization: Mixed Precision (where applicable)
+**Applied in**: Could be applied in Monte Carlo (not currently implemented)
+**Rule**: float for intermediate simulation (Z, S_T), double for final accumulation
+**Hardware reason**: T4 FP32 peak = 65 TFLOPS, FP64 peak = 8 TFLOPS → 8x throughput on inner loop. Double accumulation prevents drift across 100k additions.
+**Note**: Currently all implementations use double throughout. Mixed precision is a future optimization.
+
+---
+
+## 6. Naive Versions — Intentional Anti-patterns
+
+**CRITICAL**: The naive versions contain deliberate anti-patterns. Do NOT "fix" them.
+
+### Black-Scholes GPU Naive (`src/black_scholes/gpu_naive/src/bs_gpu_naive.cu`)
+
+| Anti-pattern | Location | What | Why Intentional |
+|--------------|----------|------|-----------------|
+| AoS layout | `struct OptionContractGPU` | Thread i reads 48 bytes away from thread i+1 | Demonstrates coalescing impact (~3% efficiency) |
+| BLOCK_SIZE=32 | Kernel launch | 1 warp per block | Demonstrates occupancy impact (~20% occupancy) |
+| Pageable memory | `std::vector` host buffers | cudaMemcpy stages through pinned buffer | Shows async transfer limitation |
+| Inline math | Kernel body | No __device__ helper functions | Shows code reuse limitation (minor impact) |
+
+### Monte Carlo GPU Naive (`src/monte_carlo/gpu_naive/src/mc_gpu_naive.cu`)
+
+| Anti-pattern | Location | What | Why Intentional |
+|--------------|----------|------|-----------------|
+| AoS layout | `struct OptionContractGPU` | Same as BS naive | Demonstrates coalescing impact |
+| cuRAND host API | `curandGenerateNormalDouble` | Generates RNG on CPU | Demonstrates 800MB PCIe bottleneck |
+| BLOCK_SIZE=32 | Kernel launch | Same as BS naive | Demonstrates occupancy impact |
+| Double precision | All calculations | No float intermediate | Shows 8x throughput waste on T4 |
+
+---
+
+## 7. Benchmarking Rules
+
+### Methodology
+- `n_warmup = 3`: Cold cache warming, branch predictor training
+- `n_runs = 10`: Statistical significance for stddev calculation
+- CPU baseline = speedup denominator for each family (BS CPU for BS GPU, MC CPU for MC GPU)
+
+### JSON Output Format
+```json
+{
+  "name": "executable_name",
+  "n_options": 1000000,
+  "mean_ms": 9.123456,
+  "stddev_ms": 0.234567,
+  "min_ms": 8.901234,
+  "max_ms": 9.456789,
+  "throughput": 109587241.234,
+  "speedup": 1.0
 }
-
-#ifdef __CUDACC__
-__host__ __device__
-#endif
-inline double normalPDF(double x) noexcept {
-    constexpr double inv_sqrt2pi = 0.3989422804014327;
-    return inv_sqrt2pi * std::exp(-0.5 * x * x);
-}
-
-} // namespace mini_aladdin::math
 ```
 
-### 2.3 `timer.hpp`
-
-```cpp
-#pragma once
-#include <chrono>
-
-namespace mini_aladdin::bench {
-
-class Timer {
-public:
-    using Clock = std::chrono::steady_clock;
-    
-    void start() noexcept { start_ = Clock::now(); }
-    void stop() noexcept { end_ = Clock::now(); }
-    
-    [[nodiscard]] double elapsed_ms() const noexcept {
-        return std::chrono::duration<double, std::milli>(end_ - start_).count();
-    }
-    
-    [[nodiscard]] double throughput(std::size_t n_options) const noexcept {
-        return static_cast<double>(n_options) / (elapsed_ms() * 1e-3);
-    }
-
-private:
-    Clock::time_point start_{};
-    Clock::time_point end_{};
-};
-
-} // namespace mini_aladdin::bench
-```
-
-### 2.4 `benchmark_runner.hpp`
-
-```cpp
-#pragma once
-#include "timer.hpp"
-#include <vector>
-#include <algorithm>
-#include <numeric>
-#include <cmath>
-
-namespace mini_aladdin::bench {
-
-struct BenchmarkResult {
-    std::string name;
-    std::size_t n_options;
-    double mean_ms;
-    double stddev_ms;
-    double min_ms;
-    double max_ms;
-    double throughput;
-    
-    void print() const;
-    void to_json(const std::string& filepath) const;
-};
-
-template<typename Fn>
-BenchmarkResult run_benchmark(
-    std::string name,
-    std::size_t n_options,
-    Fn&& fn,
-    int n_warmup = 3,
-    int n_runs = 10
-) {
-    for (int i = 0; i < n_warmup; ++i) fn();
-    
-    std::vector<double> timings(n_runs);
-    Timer timer;
-    
-    for (int i = 0; i < n_runs; ++i) {
-        timer.start();
-        fn();
-        timer.stop();
-        timings[i] = timer.elapsed_ms();
-    }
-    
-    double mean = std::accumulate(timings.begin(), timings.end(), 0.0) / n_runs;
-    double variance = 0.0;
-    for (double t : timings) variance += (t - mean) * (t - mean);
-    variance /= n_runs;
-    
-    return BenchmarkResult{
-        .name = std::move(name),
-        .n_options = n_options,
-        .mean_ms = mean,
-        .stddev_ms = std::sqrt(variance),
-        .min_ms = *std::min_element(timings.begin(), timings.end()),
-        .max_ms = *std::max_element(timings.begin(), timings.end()),
-        .throughput = static_cast<double>(n_options) / (mean * 1e-3)
-    };
-}
-
-} // namespace mini_aladdin::bench
-```
-
-### 2.5 `csv_loader.hpp`
-
-```cpp
-#pragma once
-#include "option.hpp"
-#include <fstream>
-#include <sstream>
-#include <iostream>
-
-namespace mini_aladdin {
-
-class CsvLoader {
-public:
-    static OptionBatch load(const std::string& filepath) {
-        OptionBatch batch;
-        std::ifstream file(filepath);
-        
-        if (!file.is_open()) {
-            std::cerr << "Error: Cannot open " << filepath << std::endl;
-            return batch;
-        }
-        
-        std::string line;
-        std::getline(file, line); // Skip header
-        
-        while (std::getline(file, line)) {
-            if (line.empty()) continue;
-            
-            std::stringstream ss(line);
-            std::string ticker;
-            double S, K, r, sigma, T;
-            int is_call_int;
-            
-            std::getline(ss, ticker, ',');
-            ss >> S; ss.ignore(1, ',');
-            ss >> K; ss.ignore(1, ',');
-            ss >> r; ss.ignore(1, ',');
-            ss >> sigma; ss.ignore(1, ',');
-            ss >> T; ss.ignore(1, ',');
-            ss >> is_call_int;
-            
-            batch.tickers.push_back(ticker);
-            batch.S.push_back(S);
-            batch.K.push_back(K);
-            batch.r.push_back(r);
-            batch.sigma.push_back(sigma);
-            batch.T.push_back(T);
-            batch.is_call.push_back(static_cast<int8_t>(is_call_int));
-        }
-        
-        return batch;
-    }
-};
-
-} // namespace mini_aladdin
-```
+### Speedup Calculation
+`aggregate_results.py` computes speedup relative to CPU baseline for each algorithm family:
+- Black-Scholes: `speedup = bs_cpu_time / gpu_time`
+- Monte Carlo: `speedup = mc_cpu_time / gpu_time`
 
 ---
 
-## 3. Black-Scholes Implementations
+## 8. Validation Tolerances
 
-### 3.1 CPU Version (`black_scholes_cpu`)
+```
+BS GPU naive vs BS CPU:      1e-6  (deterministic, exact match expected)
+BS GPU optimized vs BS CPU:  1e-6  (deterministic, exact match expected)
+MC CPU vs BS analytical:     1e-2  (Monte Carlo statistical error, 100k sims)
+MC GPU naive vs MC CPU:      1e-2  (same statistical error)
+MC GPU optimized vs MC CPU:  1e-2  (same statistical error)
+```
 
-**File**: `src/black_scholes/cpu/src/bs_cpu_pricer.cpp`
-
-Sequential CPU implementation serving as the performance baseline.
-
-**Key Features**:
-- Scalar loop over all options
-- Uses `std::span` for zero-copy data access
-- AVX2 auto-vectorization enabled via compiler flags
-
-### 3.2 GPU Naive (`black_scholes_gpu_naive`)
-
-**File**: `src/black_scholes/gpu_naive/src/bs_gpu_naive.cu`
-
-Intentionally unoptimized baseline for Nsight profiling comparison.
-
-**De-optimizations Applied**:
-1. **AoS layout**: Breaks memory coalescing (~3% efficiency)
-2. **Synchronous transfers**: cudaMemcpy blocks CPU
-3. **BLOCK_SIZE=32**: Single warp per block, low occupancy
-4. **No pinned memory**: std::vector for host data
-5. **Inline math**: No code reuse with __device__ helpers
-
-### 3.3 GPU Optimized (`black_scholes_gpu_optimized`)
-
-**File**: `src/black_scholes/gpu_optimized/src/bs_gpu_optimized.cu`
-
-Fully optimized GPU implementation.
-
-**Optimizations Applied**:
-1. **SoA layout**: Perfect memory coalescing (~98% efficiency)
-2. **BLOCK_SIZE=256**: 8 warps per block, high occupancy
-3. **Reused math**: `normalCDF` from math_utils.hpp with `__host__ __device__`
-
-**Expected Speedup**: ~50x vs CPU
+**Why tolerances differ**: Black-Scholes is deterministic analytical formula — results should match exactly. Monte Carlo is statistical simulation with inherent variance from random sampling. With 100k simulations per option, expected standard error is ~0.3% (1e-2 tolerance allows for 3-sigma variation).
 
 ---
 
-## 4. Monte Carlo Implementations
+## 9. C++20 Rules
 
-### 4.1 CPU Version (`monte_carlo_cpu`)
+### [[nodiscard]] on all pricing functions
+→ Silently ignoring a computed price = financial bug. Compiler catches it.
 
-**File**: `src/monte_carlo/cpu/src/mc_cpu_pricer.cpp`
+### noexcept on all hot-path functions
+→ Enables compiler to skip exception handling overhead on critical paths.
 
-Multi-threaded CPU Monte Carlo using C++17 parallel algorithms.
+### std::span for batch parameters
+→ Non-owning view. Zero copy. Works with vector, array, raw pointer.
+→ Signals clearly: this function reads your data, does not own it.
 
-**Key Features**:
-- `std::execution::par_unseq` for parallel + SIMD
-- `std::mt19937_64` per thread for reproducibility
-- Configurable number of simulation paths
+### std::execution::par_unseq in MC CPU
+→ `par` = thread pool (no raw threads). `unseq` = SIMD within each thread.
 
-### 4.2 GPU Naive (`monte_carlo_gpu_naive`)
+### Designated initializers
+```cpp
+OptionContract opt{
+    .S = S[i], .K = K[i], .r = r[i],
+    .sigma = sigma[i], .T = T[i],
+    .is_call = static_cast<bool>(is_call[i])
+};
+```
+→ Self-documenting, order-independent, C++20 feature.
 
-**File**: `src/monte_carlo/gpu_naive/src/mc_gpu_naive.cu`
+### Digit separators: 100'000, 1'000'000
+→ Readability. Required for all large numeric literals.
 
-Demonstrates common GPU anti-patterns.
-
-**De-optimizations Applied**:
-1. **AoS layout**: Same coalescing issues as BS naive
-2. **cuRAND host API**: Generates randoms on CPU, transfers to GPU
-   - Buffer size: n_options × n_sims × 8 bytes
-   - Example: 10k × 10k × 8B = 800MB PCIe transfer
-3. **Global accumulation**: sum written to global memory each iteration
-4. **Double precision**: Wastes 8x compute throughput vs float
-5. **BLOCK_SIZE=32**: Low occupancy
-
-### 4.3 GPU Optimized (`monte_carlo_gpu_optimized`)
-
-**File**: `src/monte_carlo/gpu_optimized/src/mc_gpu_optimized.cu`
-
-Best-practice GPU Monte Carlo.
-
-**Optimizations Applied**:
-1. **SoA layout**: Coalesced memory access
-2. **cuRAND device API**: Per-thread RNG, zero transfer overhead
-3. **Register accumulation**: Local variable sum, single global write
-4. **BLOCK_SIZE=256**: Maximum occupancy
-5. **SoA + coalescing**: 98% memory efficiency
-
-**Expected Speedup**: ~39x vs CPU (up to 50x with streams)
+### constexpr for BLOCK_SIZE and math constants
+→ Compile-time evaluation. Enables compiler to optimize grid size calculation.
 
 ---
 
-## 5. Build System
+## 10. Build System Rules
 
-### 5.1 Root CMakeLists.txt
+### Header-only core library
+`core` is an INTERFACE target in CMake. No compilation unit — headers included directly.
+→ Faster builds, no linking overhead, templates work across translation units.
 
+### CUDA architectures: 61;75;86
+- **61**: Pascal (GTX 1080, P100) — baseline compatibility
+- **75**: Turing (RTX 2080, T4) — primary development target
+- **86**: Ampere (RTX 3080, A100) — future-proofing
+
+Why this list: Covers 3 major generations. PTX fallback handles newer/older GPUs at runtime.
+
+### MSVC flags
+- `/O2` — Maximum optimization
+- `/arch:AVX2` — Enable AVX2 vectorization for CPU code
+- `/fp:fast` — Allow reordering for vectorization (safe for our use case)
+- `/std:c++latest` — C++20 features
+
+### GCC/Clang flags
+- `-O3` — Maximum optimization
+- `-march=native` — Target host CPU capabilities
+- `-ffast-math` — Same as /fp:fast
+
+### GPU CMakeLists.txt pattern
+Each GPU executable subdirectory contains:
 ```cmake
 cmake_minimum_required(VERSION 3.20)
-project(MiniAladdin LANGUAGES CXX CUDA)
-
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-
-# Core library (header-only)
-add_library(core INTERFACE)
-target_include_directories(core INTERFACE 
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/include
-)
-
-# CPU optimization flags
-if(MSVC)
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /arch:AVX2 /fp:fast /std:c++latest")
-else()
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -march=native -ffast-math")
-endif()
-
-# Black-Scholes CPU
-add_executable(black_scholes_cpu 
-    src/black_scholes/cpu/src/bs_cpu_pricer.cpp
-    src/black_scholes/cpu/src/main.cpp
-)
-target_include_directories(black_scholes_cpu PRIVATE 
-    src/black_scholes/cpu/include
-    src/core/include
-)
-target_link_libraries(black_scholes_cpu core)
-
-# Monte Carlo CPU
-add_executable(monte_carlo_cpu 
-    src/monte_carlo/cpu/src/mc_cpu_pricer.cpp
-    src/monte_carlo/cpu/src/main.cpp
-)
-target_include_directories(monte_carlo_cpu PRIVATE 
-    src/monte_carlo/cpu/include
-    src/core/include
-)
-target_link_libraries(monte_carlo_cpu core)
-
-# GPU Projects
-add_subdirectory(src/black_scholes/gpu_naive)
-add_subdirectory(src/black_scholes/gpu_optimized)
-add_subdirectory(src/monte_carlo/gpu_naive)
-add_subdirectory(src/monte_carlo/gpu_optimized)
-```
-
-### 5.2 GPU Project CMakeLists.txt (Example: gpu_naive)
-
-```cmake
-cmake_minimum_required(VERSION 3.20)
-
-add_executable(black_scholes_gpu_naive
-    src/bs_gpu_naive.cu
-    src/main.cpp
-)
-
-target_include_directories(black_scholes_gpu_naive PRIVATE
-    include
-    ${CMAKE_SOURCE_DIR}/src/core/include
-    ${CMAKE_SOURCE_DIR}/src/black_scholes/cpu/include
-)
-
-target_link_libraries(black_scholes_gpu_naive core)
-
-set_target_properties(black_scholes_gpu_naive PROPERTIES CUDA_ARCHITECTURES "61;75;86")
-```
-
-### 5.3 Build Instructions
-
-```bash
-# Configure
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
-# Build all targets
-cmake --build build --config Release
-
-# Build specific target
-cmake --build build --config Release --target black_scholes_gpu_optimized
+add_executable(name src/kernel.cu src/main.cpp)
+target_include_directories(name PRIVATE include ${CMAKE_SOURCE_DIR}/src/core/include)
+target_link_libraries(name core)
+set_target_properties(name PROPERTIES CUDA_ARCHITECTURES "61;75;86")
 ```
 
 ---
 
-## 6. Benchmarking & Profiling Scripts
+## 11. Nsight Profiling Guide
 
-### 6.1 `scripts/benchmark_all.sh`
+After running `scripts/profile_nsight.sh`, analyze results:
 
-```bash
-#!/bin/bash
-# Runs all 6 executables sequentially and prints a unified comparison table.
-# Usage: ./scripts/benchmark_all.sh
-# Requires: all 6 executables built in ./build/
+### Nsight Systems (.nsys-rep)
+- **Timeline view**: Are H→D transfers overlapping with computation?
+- If not overlapping → check if pinned memory is used (naive versions don't; optimized should)
 
-set -e
+### Nsight Compute (.ncu-rep)
+- **Global Load Efficiency**: Should be ~3% naive, ~98% optimized
+- **SM Occupancy**: Should be ~20% naive, ~75% optimized  
+- **Memory Throughput**: Should be ~9 GB/s naive, ~287 GB/s optimized (T4 theoretical max)
+- **Compute Throughput**: Increases with optimizations (less stall, more compute)
 
-echo "Running Mini-Aladdin full benchmark suite..."
-echo ""
-
-./build/black_scholes_cpu
-./build/black_scholes_gpu_naive
-./build/black_scholes_gpu_optimized
-./build/monte_carlo_cpu
-./build/monte_carlo_gpu_naive
-./build/monte_carlo_gpu_optimized
-
-echo ""
-echo "Aggregating results..."
-python3 scripts/aggregate_results.py results/
-```
-
-### 6.2 `scripts/profile_nsight.sh`
-
-```bash
-#!/bin/bash
-# Profiles naive and optimized GPU versions with Nsight Systems and Nsight Compute.
-# Usage: ./scripts/profile_nsight.sh
-# Requires: Nsight Systems (nsys) and Nsight Compute (ncu) installed
-
-set -e
-mkdir -p results/nsight
-
-echo "=== Nsight Systems: macro timeline profiling ==="
-
-# Profile all 4 GPU executables
-nsys profile --output results/nsight/bs_gpu_naive \
-     --trace cuda,osrt \
-     ./build/black_scholes_gpu_naive
-
-nsys profile --output results/nsight/bs_gpu_optimized \
-     --trace cuda,osrt \
-     ./build/black_scholes_gpu_optimized
-
-nsys profile --output results/nsight/mc_gpu_naive \
-     --trace cuda,osrt \
-     ./build/monte_carlo_gpu_naive
-
-nsys profile --output results/nsight/mc_gpu_optimized \
-     --trace cuda,osrt \
-     ./build/monte_carlo_gpu_optimized
-
-echo ""
-echo "=== Nsight Compute: kernel-level analysis ==="
-
-ncu --set full \
-    --output results/nsight/mc_gpu_naive_kernel \
-    ./build/monte_carlo_gpu_naive
-
-ncu --set full \
-    --output results/nsight/mc_gpu_optimized_kernel \
-    ./build/monte_carlo_gpu_optimized
-
-echo ""
-echo "Nsight profiles saved to results/nsight/"
-echo "Open .nsys-rep files in Nsight Systems GUI"
-echo "Open .ncu-rep files in Nsight Compute GUI"
-echo ""
-echo "Key metrics to compare:"
-echo "  - Global Load Efficiency (naive ~3% vs optimized ~98%)"
-echo "  - SM Occupancy            (naive ~20% vs optimized ~75%)"
-echo "  - H->D / D->H overlap     (naive: none vs optimized: streams overlap)"
-```
-
-### 6.3 `scripts/aggregate_results.py`
-
-Python script that:
-- Reads the 6 JSON files from `results/`
-- Computes speedup relative to CPU baseline
-- Prints formatted comparison table
-- Saves combined results to `results/benchmark_summary.json`
+### Where to find metrics
+1. Open `.ncu-rep` in Nsight Compute GUI
+2. Navigate to "Memory Workload Analysis" section
+3. Check "Global Load Efficiency" percentage
+4. Navigate to "Occupancy" section
+5. Check "Achieved Occupancy" percentage
 
 ---
 
-## 7. Optimization Comparison
+## 12. Known Limitations & Future Work
 
-### Black-Scholes GPU: Naive vs Optimized
+### Current Limitations
+- **No CUDA Streams**: BS optimized does not overlap transfer and compute (would add ~10% speedup)
+- **No Unified Memory**: All explicit cudaMalloc/cudaMemcpy
+- **Single GPU**: No multi-GPU scaling
 
-| Aspect | Naive | Optimized | Impact |
-|--------|-------|-----------|--------|
-| Data Layout | AoS | SoA | +10x memory bandwidth |
-| Block Size | 32 | 256 | +4x occupancy |
-| Coalescing | ~3% | ~98% | Critical for throughput |
-| Math | Inline | __device__ helpers | Code reuse |
-| **Speedup** | **10x** | **50x** | **5x improvement** |
+### Future Phases (not started)
+- **Phase 2**: Heston stochastic volatility model (more complex than Black-Scholes)
+- **Phase 3**: VaR (Value at Risk) calculation, portfolio-level Greeks
+- **Phase 4**: Multi-asset basket options, correlation handling
 
-### Monte Carlo GPU: Naive vs Optimized
-
-| Aspect | Naive | Optimized | Impact |
-|--------|-------|-----------|--------|
-| Random Generation | cuRAND host API (CPU) | cuRAND device API (GPU) | Eliminates 800MB PCIe transfer |
-| Accumulation | Global memory | Register variable | ~600 cycle latency saved per iter |
-| Precision | Double throughout | Float intermediate, double final | +8x compute throughput |
-| **Speedup** | **10x** | **39x** | **4x improvement** |
+### Optimizations to Consider
+- CUDA Streams for transfer/compute overlap
+- Mixed precision (float intermediate, double final) in Monte Carlo
+- Constant memory for model parameters
+- Shared memory for intra-block data sharing
+- Warp shuffle for intra-warp reductions
 
 ---
 
-## 8. CV Talking Points
+## 13. File Reference
 
-### Results Summary
+### Core Library
+- `src/core/include/option.hpp` — Data structures (AoS/SoA)
+- `src/core/include/math_utils.hpp` — normalCDF, normalPDF
+- `src/core/include/timer.hpp` — High-resolution timer
+- `src/core/include/benchmark_runner.hpp` — Statistical benchmarking
+- `src/core/include/csv_loader.hpp` — CSV parsing
 
-```
-black_scholes_gpu_optimized:    ~50x speedup vs CPU (100M options/s on T4)
-monte_carlo_gpu_optimized:      ~39x speedup vs CPU (4.8M options/s on T4)
-```
+### Black-Scholes
+- `src/black_scholes/cpu/include/bs_cpu_pricer.hpp`
+- `src/black_scholes/cpu/src/bs_cpu_pricer.cpp`
+- `src/black_scholes/cpu/src/main.cpp`
+- `src/black_scholes/gpu_naive/include/bs_gpu_naive.cuh`
+- `src/black_scholes/gpu_naive/src/bs_gpu_naive.cu`
+- `src/black_scholes/gpu_naive/src/main.cpp`
+- `src/black_scholes/gpu_optimized/include/bs_gpu_optimized.cuh`
+- `src/black_scholes/gpu_optimized/src/bs_gpu_optimized.cu`
+- `src/black_scholes/gpu_optimized/src/main.cpp`
 
-### Bullet Point for CV
+### Monte Carlo
+- `src/monte_carlo/cpu/include/mc_cpu_pricer.hpp`
+- `src/monte_carlo/cpu/src/mc_cpu_pricer.cpp`
+- `src/monte_carlo/cpu/src/main.cpp`
+- `src/monte_carlo/gpu_naive/include/mc_gpu_naive.cuh`
+- `src/monte_carlo/gpu_naive/src/mc_gpu_naive.cu`
+- `src/monte_carlo/gpu_naive/src/main.cpp`
+- `src/monte_carlo/gpu_optimized/include/mc_gpu_optimized.cuh`
+- `src/monte_carlo/gpu_optimized/src/mc_gpu_optimized.cu`
+- `src/monte_carlo/gpu_optimized/src/main.cpp`
 
-> *"Designed and implemented a GPU-accelerated options pricing engine in C++20/CUDA with 
-> comprehensive benchmarking framework. Implemented Black-Scholes analytical pricer achieving 
-> **50x speedup** (100M options/s on NVIDIA T4) and Monte Carlo simulation engine with cuRAND, 
-> achieving **39x speedup** on 1M simulations. Created naive vs optimized GPU implementations 
-> to demonstrate and measure impact of CUDA optimizations (memory coalescing, occupancy tuning, 
-> cuRAND device API). Profiled with Nsight Systems; achieved >90% memory coalescing efficiency. 
-> Used SoA data layout, C++20 std::span, and structured project for reproducible benchmarking."*
-
-### Interview Questions & Answers
-
-**Q: Why separate naive and optimized GPU implementations?**  
-A: The naive versions serve as Nsight profiling baselines to measure the exact impact of each optimization. Comparing naive vs optimized demonstrates understanding of GPU architecture: memory coalescing, occupancy, and API choices.
-
-**Q: Why AoS breaks coalescing?**  
-A: With Array of Structs, consecutive threads read struct fields that are sizeof(Option) bytes apart (48 bytes). This requires 32 separate memory transactions. With SoA, all spots (S) are contiguous, so 32 threads read 256 consecutive bytes in a single transaction.
-
-**Q: Why cuRAND device API vs host API?**  
-A: Host API generates randoms on CPU then transfers to GPU — 800MB PCIe bottleneck for 10k×10k simulations. Device API generates randoms directly on GPU, zero transfer overhead.
-
-**Q: How do you measure speedup fairly?**  
-A: Benchmark harness with 3 warmup runs + 10 measured runs, computing mean, stddev, and throughput. Warmup ensures caches are hot and GPU is at steady-state. Statistical stability is critical.
-
-**Q: What does Nsight teach you?**  
-A: Memory bandwidth was the initial bottleneck (low coalescing efficiency ~3%). After switching to SoA, occupancy became the limiting factor, solved by tuning block size from 32 to 256.
+### Build & Scripts
+- `CMakeLists.txt` — Root build configuration
+- `src/black_scholes/gpu_naive/CMakeLists.txt`
+- `src/black_scholes/gpu_optimized/CMakeLists.txt`
+- `src/monte_carlo/gpu_naive/CMakeLists.txt`
+- `src/monte_carlo/gpu_optimized/CMakeLists.txt`
+- `scripts/benchmark_all.sh` — Run all benchmarks
+- `scripts/profile_nsight.sh` — Nsight profiling
+- `scripts/aggregate_results.py` — Results aggregation
 
 ---
 
-*Last updated: March 2026 — Complete implementation with 6 executables, benchmarking framework, and Nsight profiling scripts*
+*Last updated: March 2026 — Documentation refactoring complete*
